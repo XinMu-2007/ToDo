@@ -52,6 +52,10 @@ struct Index {
   @State draftVersion: number = 0;
   /** 正在做分段切换：期间禁用行级过渡，只播页面级滑动 */
   @State tabSwitching: boolean = false;
+  /** 切页位移：新页先被放到 ±64vp，再滑回 0（同一时刻树上只有一页） */
+  @State tabOffset: number = 0;
+  /** 切页动画开关：置位前一帧用 0 时长，避免"跳位"也被动画化 */
+  @State tabAnimEnabled: boolean = false;
   /** 切页令牌：连续切换时以最后一次为准 */
   private tabToken: number = 0;
   /** 下拉刷新：是否在刷新中、当前下拉位移、Refresh 组件状态 */
@@ -427,19 +431,31 @@ struct Index {
     if (index === this.currentTab) {
       return;
     }
+    const dir = index > this.currentTab ? 1 : -1;
     this.tabSwitching = true;
-    this.tabToken++;
-    const token = this.tabToken;
-    this.getUIContext().animateTo(Motion.params(Motion.NORMAL), () => {
-      this.currentTab = index;
-    });
+
+    // ① 无动画地把新页放到起始偏移（此时旧页已经从树上移除，绝不会同时出现两页）
+    this.tabAnimEnabled = false;
+    this.tabOffset = dir * 64;
+    this.currentTab = index;
+
+    // ② 下一帧滑回原位；用令牌保证连续切换时只有最后一次生效
+    const token = ++this.tabToken;
     setTimeout(() => {
-      // 连续点击时只让最后一次恢复行级过渡
+      if (token !== this.tabToken) {
+        return;
+      }
+      this.tabAnimEnabled = true;
+      this.tabOffset = 0;
+    }, 16);
+
+    setTimeout(() => {
       if (token === this.tabToken) {
         this.tabSwitching = false;
       }
-    }, Motion.NORMAL + 60);
+    }, Motion.NORMAL + 80);
   }
+
 
   /**
    * 下拉刷新：强制从磁盘重读（另一个进程可能刚改过数据），
@@ -491,20 +507,6 @@ struct Index {
     .backgroundColor($r('app.color.card_bg'))
     .borderRadius(14)
     .shadow(Motion.dragPreviewShadow())
-  }
-
-  @Builder
-  segment(label: string, index: number) {
-    Text(label)
-      .fontSize(14)
-      .fontWeight(this.currentTab === index ? FontWeight.Medium : FontWeight.Normal)
-      .fontColor(this.currentTab === index ? $r('app.color.text_primary') : $r('app.color.text_secondary'))
-      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-      .backgroundColor(this.currentTab === index ? $r('app.color.card_bg_secondary') : Color.Transparent)
-      .borderRadius(14)
-      .onClick(() => {
-        this.switchTab(index);
-      })
   }
 
   @Builder
@@ -725,9 +727,56 @@ struct Index {
         }
 
         // 分段
-        Row({ space: 8 }) {
-          this.segment('我的一天', 0)
-          this.segment('全部任务', 1)
+        // 分段控件：灰轨道 + 会滑动的白色药丸。
+        // 只有一个底块在动，两个文字只换颜色，因此不会出现"两个按钮同时亮"
+        Row() {
+          Stack({ alignContent: Alignment.TopStart }) {
+            Row()
+              .width(172)
+              .height(34)
+              .borderRadius(17)
+              .backgroundColor($r('app.color.card_bg_secondary'))
+
+            Row()
+              .width(84)
+              .height(30)
+              .borderRadius(15)
+              .backgroundColor($r('app.color.card_bg'))
+              .shadow({ radius: 6, color: '#1A000000', offsetY: 1 })
+              .translate({ x: this.currentTab === 0 ? 0 : 84 })
+              .animation(Motion.params(Motion.FAST))
+              .margin({ left: 2, top: 2 })
+
+            Row() {
+              Text('我的一天')
+                .width(84)
+                .height(34)
+                .textAlign(TextAlign.Center)
+                .fontSize(14)
+                .fontWeight(this.currentTab === 0 ? FontWeight.Medium : FontWeight.Normal)
+                .fontColor(this.currentTab === 0
+                  ? $r('app.color.text_primary')
+                  : $r('app.color.text_secondary'))
+                .onClick(() => {
+                  this.switchTab(0);
+                })
+              Text('全部任务')
+                .width(84)
+                .height(34)
+                .textAlign(TextAlign.Center)
+                .fontSize(14)
+                .fontWeight(this.currentTab === 1 ? FontWeight.Medium : FontWeight.Normal)
+                .fontColor(this.currentTab === 1
+                  ? $r('app.color.text_primary')
+                  : $r('app.color.text_secondary'))
+                .onClick(() => {
+                  this.switchTab(1);
+                })
+            }
+            .margin({ left: 2 })
+          }
+          .width(172)
+          .height(34)
         }
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 8 })
@@ -760,7 +809,7 @@ struct Index {
                         }
                       })
                     }
-                    .swipeAction({ start: this.swipeActions(task) })
+                    .swipeAction({ end: this.swipeActions(task) })
                     // 拖拽/切页期间不播"删除过渡"，否则换位时整行会往左甩一下
                     .transition(this.tabSwitching || this.rowAnimSuppressed || this.dragFrom >= 0
                       ? TransitionEffect.IDENTITY
@@ -834,7 +883,9 @@ struct Index {
             }
             .width('100%')
             .height('100%')
-            .transition(Motion.pageSlide(-1))
+            .translate({ x: this.tabOffset })
+            .opacity(this.tabOffset === 0 ? 1 : 0.7)
+            .animation(this.tabAnimEnabled ? Motion.params(Motion.NORMAL) : Motion.params(0))
           } else {
             // 「全部任务」在右边 → 进入时从右侧滑入
             Column() {
@@ -861,7 +912,7 @@ struct Index {
                         }
                       })
                     }
-                    .swipeAction({ start: this.swipeActions(task) })
+                    .swipeAction({ end: this.swipeActions(task) })
                     .transition(this.tabSwitching || this.rowAnimSuppressed
                       ? TransitionEffect.IDENTITY
                       : Motion.rowTransition())
@@ -871,6 +922,16 @@ struct Index {
                 .height('100%')
                 .divider({ strokeWidth: 0.5, color: $r('app.color.divider'), startMargin: 48 })
                 .scrollBar(BarState.Off)
+                // 并行手势：只认"向右"的滑动（回到「我的一天」），
+                // 向左留给行内的 swipeAction 菜单，互不抢占
+                .parallelGesture(
+                  PanGesture({ direction: PanDirection.Horizontal, distance: 20 })
+                    .onActionEnd((event: GestureEvent) => {
+                      if (event.offsetX >= 60 && this.currentTab === 1) {
+                        this.switchTab(0);
+                      }
+                    })
+                )
                 }
                 .width('100%')
                 .layoutWeight(1)
@@ -887,7 +948,9 @@ struct Index {
             }
             .width('100%')
             .height('100%')
-            .transition(Motion.pageSlide(1))
+            .translate({ x: this.tabOffset })
+            .opacity(this.tabOffset === 0 ? 1 : 0.7)
+            .animation(this.tabAnimEnabled ? Motion.params(Motion.NORMAL) : Motion.params(0))
           }
         }
         .width('100%')
